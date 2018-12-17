@@ -26,6 +26,7 @@ import (
 )
 
 var localListenAddr = &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)}
+var localListenUnixAddr = &net.UnixAddr{Net: "unixpacket", Name: "test_unix.socket"}
 
 func TestNewTUDPClientTransport(t *testing.T) {
 	_, err := NewTUDPClientTransport("fakeAddressAndPort", "")
@@ -147,6 +148,19 @@ func TestDoubleCloseError(t *testing.T) {
 	assert.Equal(t, errConnAlreadyClosed, trans.Close(), "second Close() returns an error")
 }
 
+func TestUnixConnClosedReadWrite(t *testing.T) {
+	trans, err := NewTUNIXServerTransport("testing_unix.socket")
+	require.Nil(t, err)
+	require.True(t, trans.IsOpen())
+	require.NoError(t, trans.Close())
+	require.False(t, trans.IsOpen())
+
+	_, err = trans.Read(make([]byte, 1))
+	require.NotNil(t, err)
+	_, err = trans.Write([]byte("test"))
+	require.NotNil(t, err)
+}
+
 func TestConnClosedReadWrite(t *testing.T) {
 	trans, err := NewTUDPServerTransport(localListenAddr.String())
 	require.Nil(t, err)
@@ -219,7 +233,15 @@ func withLocalServer(t *testing.T, f func(addr string)) {
 	require.NoError(t, conn.Close(), "Close failed")
 }
 
+func withLocalUnixServer(t *testing.T, f func(addr string)) {
+	conn, err := net.ListenUnix("unixgram", localListenUnixAddr)
+	require.NoError(t, err, "ListenUnix failed")
+
+	f(localListenUnixAddr.String())
+	require.NoError(t, conn.Close(), "Close failed")
+}
+
 func TestCreateClient(t *testing.T) {
-	_, err := createClient(nil, nil)
+	_, err := createUdpClient(nil, nil)
 	assert.EqualError(t, err, "dial udp: missing address")
 }

@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"errors"
 	"net"
+	"os"
+	"sync"
 	"sync/atomic"
 
 	"github.com/apache/thrift/lib/go/thrift"
@@ -28,9 +30,60 @@ const MaxLength = 65000
 
 var errConnAlreadyClosed = errors.New("connection already closed")
 
+type dgramconn interface {
+	Close() error
+	LocalAddr() net.Addr
+	Read([]byte) (int, error)
+	Write([]byte) (int, error)
+}
+
+type unixconn struct {
+	conn       *net.UnixConn
+	unlinkOnce *sync.Once
+}
+
+func (u unixconn) Close() error {
+	u.unlinkOnce.Do(func() {
+		os.Remove(u.LocalAddr().String())
+	})
+	return u.conn.Close()
+}
+
+func (u unixconn) LocalAddr() net.Addr {
+	return u.conn.LocalAddr()
+}
+
+func (u unixconn) Read(buf []byte) (int, error) {
+	return u.conn.Read(buf)
+}
+
+func (u unixconn) Write(buf []byte) (int, error) {
+	return u.conn.Write(buf)
+}
+
+type udpconn struct {
+	conn *net.UDPConn
+}
+
+func (u udpconn) Close() error {
+	return u.conn.Close()
+}
+
+func (u udpconn) LocalAddr() net.Addr {
+	return u.conn.LocalAddr()
+}
+
+func (u udpconn) Read(buf []byte) (int, error) {
+	return u.conn.Read(buf)
+}
+
+func (u udpconn) Write(buf []byte) (int, error) {
+	return u.conn.Write(buf)
+}
+
 // TUDPTransport does UDP as a thrift.TTransport
 type TUDPTransport struct {
-	conn     *net.UDPConn
+	conn     dgramconn
 	addr     net.Addr
 	writeBuf bytes.Buffer
 	closed   uint32 // atomic flag
@@ -55,15 +108,28 @@ func NewTUDPClientTransport(destHostPort string, locHostPort string) (*TUDPTrans
 		}
 	}
 
-	return createClient(destAddr, locAddr)
+	return createUdpClient(destAddr, locAddr)
 }
 
-func createClient(destAddr, locAddr *net.UDPAddr) (*TUDPTransport, error) {
+func createUdpClient(destAddr, locAddr *net.UDPAddr) (*TUDPTransport, error) {
 	conn, err := net.DialUDP(destAddr.Network(), locAddr, destAddr)
 	if err != nil {
 		return nil, thrift.NewTTransportException(thrift.NOT_OPEN, err.Error())
 	}
-	return &TUDPTransport{addr: destAddr, conn: conn}, nil
+	return &TUDPTransport{addr: destAddr, conn: udpconn{conn: conn}}, nil
+}
+
+func NewTUNIXClientTransport(path string) (*TUDPTransport, error) {
+	addr, err := net.ResolveUnixAddr("unixgram", path)
+	if err != nil {
+		return nil, thrift.NewTTransportException(thrift.NOT_OPEN, err.Error())
+	}
+
+	conn, err := net.DialUnix("unixgram", nil, addr)
+	if err != nil {
+		return nil, thrift.NewTTransportException(thrift.NOT_OPEN, err.Error())
+	}
+	return &TUDPTransport{addr: addr, conn: unixconn{conn: conn, unlinkOnce: &sync.Once{}}}, nil
 }
 
 // NewTUDPServerTransport creates a net.UDPConn-backed TTransport for Thrift servers
@@ -82,6 +148,18 @@ func NewTUDPServerTransport(hostPort string) (*TUDPTransport, error) {
 	return &TUDPTransport{addr: conn.LocalAddr(), conn: conn}, nil
 }
 
+func NewTUNIXServerTransport(path string) (*TUDPTransport, error) {
+	addr, err := net.ResolveUnixAddr("unixgram", path)
+	if err != nil {
+		return nil, thrift.NewTTransportException(thrift.NOT_OPEN, err.Error())
+	}
+	conn, err := net.ListenUnixgram("unixgram", addr)
+	if err != nil {
+		return nil, thrift.NewTTransportException(thrift.NOT_OPEN, err.Error())
+	}
+	return &TUDPTransport{addr: conn.LocalAddr(), conn: unixconn{conn: conn, unlinkOnce: &sync.Once{}}}, nil
+}
+
 // Open does nothing as connection is opened on creation
 // Required to maintain thrift.TTransport interface
 func (p *TUDPTransport) Open() error {
@@ -89,7 +167,7 @@ func (p *TUDPTransport) Open() error {
 }
 
 // Conn retrieves the underlying net.UDPConn
-func (p *TUDPTransport) Conn() *net.UDPConn {
+func (p *TUDPTransport) Conn() dgramconn {
 	return p.conn
 }
 
